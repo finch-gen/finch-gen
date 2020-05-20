@@ -62,6 +62,7 @@ jobs:
       run: |
         TAGORBRANCH=$(sed -e 's/refs\/tags\///g' -e 's/refs\/heads\///g' <<< "$GITHUB_REF")
         rm -rf website/reference/finch-gen/$TAGORBRANCH
+        mkdir -p website/reference/finch-gen/$TAGORBRANCH
         cp -r target/doc/* website/reference/finch-gen/$TAGORBRANCH
 
     - name: Upload artifacts

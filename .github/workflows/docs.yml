@@ -9,16 +9,9 @@ jobs:
     - uses: actions/checkout@v2
       with:
         submodules: true
-
-    - name: Get the version
-      id: get_version
-      run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
     
     - name: Print version
-      run: echo ${${GITHUB_REF/refs\/heads\//}/refs\/tags\//}
-
-    - name: ls
-      run: ls
+      run: sed -e 's/refs\/tags\///g' -e 's/refs\/heads\///g' <<< "$GITHUB_REF"
 
     - name: Cache cargo registry
       uses: actions/cache@v1
@@ -39,10 +32,10 @@ jobs:
         key: docs-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build Docs
-      uses: actions-rs/cargo@v1
-      with:
-        command: doc
-        args: --release --lib --no-deps
+      run: |
+        GEN_ID=$(cargo pkgid finch-gen)
+        MACRO_ID=$(cargo pkgid finch-macro)
+        cargo doc --release --lib --no-deps -p $GEN_ID -p $MACRO_ID
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v1

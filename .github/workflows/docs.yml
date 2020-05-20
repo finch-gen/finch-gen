@@ -33,7 +33,7 @@ jobs:
 
     - name: Build Docs
       run: |
-        cargo build --release
+        cargo fetch
         GEN_ID=$(cargo pkgid finch-gen)
         MACRO_ID=$(cargo pkgid finch-macro)
         cargo doc --release --lib --no-deps -p $GEN_ID -p $MACRO_ID

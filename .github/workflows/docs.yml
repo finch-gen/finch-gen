@@ -38,6 +38,23 @@ jobs:
         MACRO_ID=$(cargo pkgid finch-macro)
         cargo doc --release --lib --no-deps -p $GEN_ID -p $MACRO_ID
 
+    - name: Add index.html
+      run: |
+        cat target/doc/index.html "
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>finch-gen</title>
+            <meta http-equiv="refresh" content="0; URL='finch_gen'" />
+          </head>
+          <body>
+            
+          </body>
+          </html>
+        "
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v1
       with:

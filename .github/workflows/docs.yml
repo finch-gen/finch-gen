@@ -77,8 +77,15 @@ jobs:
         rm -rf website/reference/${{ env.CRATE_NAME }}/$TAGORBRANCH
         mkdir -p website/reference/${{ env.CRATE_NAME }}/$TAGORBRANCH
         cp -r target/doc/* website/reference/${{ env.CRATE_NAME }}/$TAGORBRANCH
+      
+    - name: Copy files to website latest
+      if: contains(github.sha, "tags")
+      run: |
+        rm -rf website/reference/${{ env.CRATE_NAME }}/latest
+        mkdir -p website/reference/${{ env.CRATE_NAME }}/latest
+        cp -r target/doc/* website/reference/${{ env.CRATE_NAME }}/latest
 
-    - name: Commit files
+    - name: Push files
       run: |
         cd website
         node ensure-docs.js

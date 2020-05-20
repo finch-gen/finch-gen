@@ -55,8 +55,8 @@ jobs:
     - name: Checkout website
       uses: actions/checkout@v2
       with:
-        repository: 'finch-gen/finch-gen.github.io'
-        path: 'website'
+        repository: finch-gen/finch-gen.github.io
+        path: website
 
     - name: Copy files to website
       run: |
@@ -65,14 +65,22 @@ jobs:
         mkdir -p website/reference/finch-gen/$TAGORBRANCH
         cp -r target/doc/* website/reference/finch-gen/$TAGORBRANCH
 
+    - name: Commit files
+      run: |
+        cd website
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git commit -m "action: generate finch-gen docs" -a
+
+    - name: Push changes
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GH_TOKEN }}
+        directory: 'website'
+        repository: finch-gen/finch-gen.github.io
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v1
       with:
         name: docs
         path: target/doc
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v1
-      with:
-        name: website
-        path: website

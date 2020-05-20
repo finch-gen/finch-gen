@@ -9,9 +9,6 @@ jobs:
     - uses: actions/checkout@v2
       with:
         submodules: true
-    
-    - name: Print version
-      run: sed -e 's/refs\/tags\///g' -e 's/refs\/heads\///g' <<< "$GITHUB_REF"
 
     - name: Cache cargo registry
       uses: actions/cache@v1
@@ -55,8 +52,26 @@ jobs:
           </html>
         EOL
 
+    - name: Checkout website
+      uses: actions/checkout@v2
+      with:
+        repository: 'https://github.com/finch-gen/finch-gen.github.io'
+        path: 'website'
+
+    - name: Copy files to website
+      run: |
+        TAGORBRANCH=sed -e 's/refs\/tags\///g' -e 's/refs\/heads\///g' <<< "$GITHUB_REF"
+        rm -rf website/reference/finch-gen/$TAGORBRANCH
+        cp -r target/doc/* website/reference/finch-gen/$TAGORBRANCH
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v1
       with:
         name: docs
         path: target/doc
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v1
+      with:
+        name: website
+        path: website

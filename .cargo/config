@@ -1,0 +1,7 @@
+[build]
+rustdocflags = [
+  "--extend-css", "rustdoc-theme/docs.css",
+  "--html-in-header", "rustdoc-theme/head.html",
+  "--html-before-content", "rustdoc-theme/header.html",
+  "--html-after-content", "rustdoc-theme/footer.html"
+]

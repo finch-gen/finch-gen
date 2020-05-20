@@ -13,6 +13,12 @@ jobs:
     - name: Get the version
       id: get_version
       run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+    
+    - name: Print version
+      run: echo {{ get_version.VERSION }}
+
+    - name: ls
+      run: ls
 
     - name: Cache cargo registry
       uses: actions/cache@v1
@@ -36,4 +42,4 @@ jobs:
       uses: actions-rs/cargo@v1
       with:
         command: doc
-        args: --release
+        args: --release --lib --no-deps

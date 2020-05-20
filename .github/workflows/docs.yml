@@ -50,10 +50,10 @@ jobs:
     - name: Add index.html
       run: |
         cat >target/doc/index.html <<EOL
-          ---
-          layout: redirect
-          destination: ${{ env.CRATE_UNDERSCORE }}
-          ---
+        ---
+        layout: redirect
+        destination: ${{ env.CRATE_UNDERSCORE }}
+        ---
         EOL
 
     - name: Checkout website

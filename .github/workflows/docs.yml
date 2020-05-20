@@ -91,7 +91,8 @@ jobs:
         node ensure-docs.js
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git commit -m "action: generate ${{ env.CRATE_NAME }} docs" -a
+        git add -A
+        git diff-index --quiet HEAD || git commit -m "action: generate ${{ env.CRATE_NAME }} docs"
         git push origin master
 
     - name: Upload artifacts

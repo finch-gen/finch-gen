@@ -1,12 +1,26 @@
+#![cfg_attr(nightly, feature(proc_macro_diagnostic))]
 
 use std::sync::Once;
 use std::iter::FromIterator;
+use std::sync::Mutex;
 use syn::spanned::Spanned;
 use proc_macro::TokenStream;
+use lazy_static::lazy_static;
 use syn::{parse_macro_input, parse_quote};
-use quote::{quote, quote_spanned, format_ident};
+use quote::{quote, format_ident};
+
+mod builtin;
+mod diagnostic;
+use diagnostic::{Diagnostic, DiagnosticLevel};
 
 static INJECT: Once = Once::new();
+
+lazy_static! {
+  // static ref CLASS_ERROR: HashMap<String, bool> = {
+  //   HashMap::new()
+  // };
+  static ref CLASS_ERROR: Mutex<Vec<String>> = Mutex::new(vec![]);
+}
 
 fn doc_filter<'r>(x: &'r &syn::Attribute) -> bool {
   x.path.segments.first().unwrap().ident.to_string() == "doc"
@@ -28,10 +42,12 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
       match data.vis {
         syn::Visibility::Public(_) => {}
         _ => {
-          return TokenStream::from(quote_spanned! {
-            data.span() =>
-            compile_error!("struct not public but exported with #[finch_bindgen]");
-          });
+          CLASS_ERROR.lock().unwrap().push(name.to_string());
+
+          return Diagnostic::spanned(data.span(), DiagnosticLevel::Error, "finch-gen[E001] struct not public but exported with #[finch_bindgen]")
+            .note("go to https://finch-gen.github.io/docs/errors/E001 for more information")
+            .span_help(data.struct_token.span, "add 'pub' here")
+            .emit(item);
         }
       }
 
@@ -124,10 +140,14 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
       if let syn::Type::Path(path) = *input.self_ty.clone() {
         name = path.path.segments.first().unwrap().ident.clone();
       } else {
-        return TokenStream::from(quote_spanned! {
-          input.span() =>
-          compile_error!("invalid type found, expected path");
-        });
+        let ty = input.self_ty;
+        return Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E005] invalid type found: expected path, got '{}'", quote!(#ty)))
+          .note("go to https://finch-gen.github.io/docs/errors/E005 for more information")
+          .emit(TokenStream::new());
+      }
+
+      if CLASS_ERROR.lock().unwrap().iter().find(|x| x == &&name.to_string()).is_some() {
+        return item;
       }
 
       let mut functions = Vec::new();
@@ -182,12 +202,38 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 int_method_name = format_ident!("___finch_bindgen___{}___class___{}___static___{}", crate_name(), name, method_name);
                 fn_body = quote!(Self::#method_name(#(#input_names),*));
               }
-              
+
+              let fn_body = if let Some(asyncness) = method.sig.asyncness {
+                if cfg!(feature = "async") {
+                  quote!({
+                    let mut rt = finch_gen::builtin::RUNTIME.get_mut();
+                    if rt.is_none() {
+                      *rt = ::std::option::Option::Some(::tokio::runtime::Runtime::new().expect("failed to create tokio runtime"));
+                    }
+  
+                    if let ::std::option::Option::Some(rt) = rt {
+                      rt.block_on(async {
+                        #fn_body.await
+                      })
+                    } else {
+                      panic!("failed to get tokio runtime")
+                    }
+                  })
+                } else {
+                  return Diagnostic::spanned(asyncness.span, DiagnosticLevel::Error, "finch-gen[E002] found async function but the 'async' feature is not enabled")
+                    .note("go to https://finch-gen.github.io/docs/errors/E002 for more information")
+                    .help("enable the 'async' feature for finch-gen in your Cargo.toml")
+                    .emit(TokenStream::new());
+                }
+              } else {
+                fn_body
+              };
 
               let (ret_expr, fn_body) = convert_return_type(&ret_type, fn_body);
               let inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma> = syn::punctuated::Punctuated::from_iter(inputs.into_iter());
 
               let doc_comments = method.attrs.iter().filter(doc_filter);
+              let panic_hook = inject_panic_hook();
 
               functions.push(quote!(
                 #(#doc_comments)
@@ -196,6 +242,8 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 #extra_comments
                 #[no_mangle]
                 pub unsafe extern fn #int_method_name(#inputs) #ret_expr {
+                  #panic_hook
+
                   #fn_body
                 }
               ));
@@ -226,11 +274,9 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     _ => {
-      let error = format!("unexpected type for #[finch_bindgen], expected struct or impl, got \"{}\"", item);
-      return TokenStream::from(quote_spanned! {
-        input.span() =>
-        compile_error!(#error);
-      });
+      return Diagnostic::spanned(input.span(), DiagnosticLevel::Error, &format!("finch-gen[E003] unexpected type for #[finch_bindgen], expected struct or impl, got '{}'", item))
+        .note("go to https://finch-gen.github.io/docs/errors/E003 for more information")
+        .emit(item);
     }
   }
 }
@@ -238,26 +284,21 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
 fn inject_boilerplate() -> proc_macro2::TokenStream {
   let mut out = proc_macro2::TokenStream::new();
   INJECT.call_once(|| {
-    let init_fn_name = format_ident!("___finch_bindgen___{}___initialize", crate_name());
-    let fn_name = format_ident!("___finch_bindgen___{}___boilerplate___free___cstring", crate_name());
-
-    out = quote!(
-      #[no_mangle]
-      pub unsafe extern fn #init_fn_name() {
-        std::panic::set_hook(Box::new(|x| {
-          println!("thread '<{}>' {}", ::std::thread::current().name().unwrap_or("unnamed"), x);
-          std::process::exit(1);
-        }));
-      }
-
-      #[no_mangle]
-      pub unsafe extern fn #fn_name(string: *mut ::std::os::raw::c_char) {
-        drop(::std::ffi::CString::from_raw(string));
-      }
-    );
+    out = builtin::make_builtin(crate_name());
   });
 
   out
+}
+
+fn inject_panic_hook() -> proc_macro2::TokenStream {
+  quote!({
+    ::finch_gen::builtin::PANIC_HOOK.call_once(|| {
+      ::std::panic::set_hook(Box::new(|x| {
+        ::std::eprintln!("thread '<{}>' {}", ::std::thread::current().name().unwrap_or("unnamed"), x);
+        ::std::process::exit(1);
+      }));
+    });
+  };)
 }
 
 fn convert_return_type(ret_type: &syn::ReturnType, body: proc_macro2::TokenStream) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
@@ -320,26 +361,32 @@ fn convert_return_type(ret_type: &syn::ReturnType, body: proc_macro2::TokenStrea
             ),
 
             "String" => (
-              quote!(-> *mut std::os::raw::c_char),
-              quote!(std::ffi::CString::new(#body).expect("Failed to create CString").into_raw())
+              quote!(-> ::finch_gen::builtin::FinchString),
+              quote!(::finch_gen::builtin::FinchString::new(#body))
             ),
 
             _ => {
-              let error = format!("finch-gen does not support the type \"{}\"", quote!(#ty));
-              return (proc_macro2::TokenStream::from(quote_spanned! {
-                path.span() =>
-                compile_error!(#error);
-              }), proc_macro2::TokenStream::new());
+              return (
+                proc_macro2::TokenStream::new(),
+                proc_macro2::TokenStream::from(
+                  Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E004] unsupported type '{}'", quote!(#ty)))
+                    .note("go to https://finch-gen.github.io/docs/errors/E004 for more information")
+                    .emit(TokenStream::new()),
+                  ),
+              );
             }
           }
         },
 
         _ => {
-          let error = format!("finch-gen does not support the type \"{}\"", quote!(#ty));
-          return (proc_macro2::TokenStream::new(), proc_macro2::TokenStream::from(quote_spanned! {
-            ty.span() =>
-            compile_error!(#error);
-          }));
+          return (
+            proc_macro2::TokenStream::new(),
+            proc_macro2::TokenStream::from(
+              Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E004] unsupported type '{}'", quote!(#ty)))
+                .note("go to https://finch-gen.github.io/docs/errors/E004 for more information")
+                .emit(TokenStream::new()),
+              ),
+          );
         }
       }
     }

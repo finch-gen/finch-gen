@@ -15,7 +15,7 @@ jobs:
       run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
     
     - name: Print version
-      run: echo {{ get_version.VERSION }}
+      run: echo ${{ get_version.VERSION }}
 
     - name: ls
       run: ls
@@ -43,3 +43,9 @@ jobs:
       with:
         command: doc
         args: --release --lib --no-deps
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v1
+      with:
+        name: docs
+        path: target/doc

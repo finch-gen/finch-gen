@@ -57,6 +57,7 @@ jobs:
       with:
         repository: finch-gen/finch-gen.github.io
         path: website
+        ssh-key: ${{ secrets.WEBSITE_DEPLOY_KEY }}
 
     - name: Copy files to website
       run: |
@@ -65,9 +66,9 @@ jobs:
         mkdir -p website/reference/finch-gen/$TAGORBRANCH
         cp -r target/doc/* website/reference/finch-gen/$TAGORBRANCH
 
-    - uses: webfactory/ssh-agent@v0.2.0
-      with:
-        ssh-private-key: ${{ secrets.WEBSITE_DEPLOY_KEY }}
+    # - uses: webfactory/ssh-agent@v0.2.0
+    #   with:
+    #     ssh-private-key: ${{ secrets.WEBSITE_DEPLOY_KEY }}
 
     - name: Commit files
       run: |

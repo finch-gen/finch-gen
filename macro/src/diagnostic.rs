@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 
-#[rustversion::not(nightly)]
+#[cfg(not(nightly))]
 use quote::{quote, quote_spanned};
 
 #[derive(Eq, PartialEq)]

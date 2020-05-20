@@ -55,7 +55,7 @@ jobs:
     - name: Checkout website
       uses: actions/checkout@v2
       with:
-        repository: 'https://github.com/finch-gen/finch-gen.github.io'
+        repository: 'finch-gen/finch-gen.github.io'
         path: 'website'
 
     - name: Copy files to website

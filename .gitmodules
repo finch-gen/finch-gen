@@ -1,3 +1,0 @@
-[submodule "rustdoc-theme"]
-	path = rustdoc-theme
-	url = https://github.com/finch-gen/rustdoc-theme

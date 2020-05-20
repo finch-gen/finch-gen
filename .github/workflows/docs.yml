@@ -2,13 +2,26 @@ name: docs
 
 on: [push]
 
+env:
+  CRATE_NAME: finch-gen
+  CRATE_UNDERSCORE: finch_gen
+
 jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
+
+    - name: Checkout rustdoc-theme
+      uses: actions/checkout@v2
       with:
-        submodules: true
+        repository: finch-gen/rustdoc-theme
+        path: rustdoc-theme
+
+    - name: Run cargo fetch
+      uses: actions-rs/cargo@v1
+      with:
+        command: fetch
 
     - name: Cache cargo registry
       uses: actions/cache@v1
@@ -29,11 +42,10 @@ jobs:
         key: docs-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build Docs
-      run: |
-        cargo fetch
-        GEN_ID=$(cargo pkgid finch-gen)
-        MACRO_ID=$(cargo pkgid finch-macro)
-        cargo doc --release --lib --no-deps -p $GEN_ID -p $MACRO_ID
+      uses: actions-rs/cargo@v1
+      with:
+        command: doc
+        args: --release --lib --no-deps
 
     - name: Add index.html
       run: |
@@ -44,7 +56,7 @@ jobs:
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>finch-gen</title>
-            <meta http-equiv="refresh" content="0; URL='finch_gen'" />
+            <meta http-equiv="refresh" content="0; URL='${{ env.CRATE_UNDERSCORE }}'" />
           </head>
           <body>
             
@@ -62,28 +74,18 @@ jobs:
     - name: Copy files to website
       run: |
         TAGORBRANCH=$(sed -e 's/refs\/tags\///g' -e 's/refs\/heads\///g' <<< "$GITHUB_REF")
-        rm -rf website/reference/finch-gen/$TAGORBRANCH
-        mkdir -p website/reference/finch-gen/$TAGORBRANCH
-        cp -r target/doc/* website/reference/finch-gen/$TAGORBRANCH
-
-    # - uses: webfactory/ssh-agent@v0.2.0
-    #   with:
-    #     ssh-private-key: ${{ secrets.WEBSITE_DEPLOY_KEY }}
+        rm -rf website/reference/${{ env.CRATE_NAME }}/$TAGORBRANCH
+        mkdir -p website/reference/${{ env.CRATE_NAME }}/$TAGORBRANCH
+        cp -r target/doc/* website/reference/${{ env.CRATE_NAME }}/$TAGORBRANCH
 
     - name: Commit files
       run: |
         cd website
+        node ensure-docs.js
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git commit -m "action: generate finch-gen docs" -a
+        git commit -m "action: generate ${{ env.CRATE_NAME }} docs" -a
         git push origin master
-
-    # - name: Push changes
-    #   uses: ad-m/github-push-action@master
-    #   with:
-    #     github_token: ${{ secrets.GH_TOKEN }}
-    #     directory: 'website'
-    #     repository: finch-gen/finch-gen.github.io
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v1

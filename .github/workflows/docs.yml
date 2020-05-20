@@ -60,7 +60,7 @@ jobs:
 
     - name: Copy files to website
       run: |
-        TAGORBRANCH=sed -e 's/refs\/tags\///g' -e 's/refs\/heads\///g' <<< "$GITHUB_REF"
+        TAGORBRANCH=$(sed -e 's/refs\/tags\///g' -e 's/refs\/heads\///g' <<< "$GITHUB_REF")
         rm -rf website/reference/finch-gen/$TAGORBRANCH
         cp -r target/doc/* website/reference/finch-gen/$TAGORBRANCH
 

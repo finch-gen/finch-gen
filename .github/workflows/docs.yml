@@ -65,19 +65,24 @@ jobs:
         mkdir -p website/reference/finch-gen/$TAGORBRANCH
         cp -r target/doc/* website/reference/finch-gen/$TAGORBRANCH
 
+    - uses: webfactory/ssh-agent@v0.2.0
+      with:
+        ssh-private-key: ${{ secrets.WEBSITE_DEPLOY_KEY }}
+
     - name: Commit files
       run: |
         cd website
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git commit -m "action: generate finch-gen docs" -a
+        git push origin master
 
-    - name: Push changes
-      uses: ad-m/github-push-action@master
-      with:
-        github_token: ${{ secrets.GH_TOKEN }}
-        directory: 'website'
-        repository: finch-gen/finch-gen.github.io
+    # - name: Push changes
+    #   uses: ad-m/github-push-action@master
+    #   with:
+    #     github_token: ${{ secrets.GH_TOKEN }}
+    #     directory: 'website'
+    #     repository: finch-gen/finch-gen.github.io
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v1

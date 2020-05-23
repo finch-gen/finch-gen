@@ -373,11 +373,11 @@ impl ToCType for syn::Type {
             }
           },
   
-          _ => parse_quote!(()),
+          _ => parse_quote!(#self),
         }
       },
   
-      _ => parse_quote!(()),
+      _ => parse_quote!(#self),
     }
   }
 

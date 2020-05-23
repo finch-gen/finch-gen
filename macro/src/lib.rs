@@ -1,8 +1,9 @@
 #![cfg_attr(nightly, feature(proc_macro_diagnostic))]
 
 use std::sync::Once;
-use std::iter::FromIterator;
 use std::sync::Mutex;
+use std::iter::FromIterator;
+use std::collections::HashSet;
 use syn::spanned::Spanned;
 use proc_macro::TokenStream;
 use lazy_static::lazy_static;
@@ -16,10 +17,7 @@ use diagnostic::{Diagnostic, DiagnosticLevel};
 static INJECT: Once = Once::new();
 
 lazy_static! {
-  // static ref CLASS_ERROR: HashMap<String, bool> = {
-  //   HashMap::new()
-  // };
-  static ref CLASS_ERROR: Mutex<Vec<String>> = Mutex::new(vec![]);
+  static ref CLASS_ERROR: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 }
 
 fn doc_filter<'r>(x: &'r &syn::Attribute) -> bool {
@@ -42,10 +40,10 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
       match data.vis {
         syn::Visibility::Public(_) => {}
         _ => {
-          CLASS_ERROR.lock().unwrap().push(name.to_string());
+          CLASS_ERROR.lock().unwrap().insert(name.to_string());
 
-          return Diagnostic::spanned(data.span(), DiagnosticLevel::Error, "finch-gen[E001] struct not public but exported with #[finch_bindgen]")
-            .note("go to https://finch-gen.github.io/docs/errors/E001 for more information")
+          return Diagnostic::spanned(data.span(), DiagnosticLevel::Error, "finch-gen[E0001] struct not public but exported with #[finch_bindgen]")
+            .note("go to https://finch-gen.github.io/docs/errors/E0001 for more information")
             .span_help(data.struct_token.span, "add 'pub' here")
             .emit(item);
         }
@@ -141,12 +139,12 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
         name = path.path.segments.first().unwrap().ident.clone();
       } else {
         let ty = input.self_ty;
-        return Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E005] invalid type found: expected path, got '{}'", quote!(#ty)))
-          .note("go to https://finch-gen.github.io/docs/errors/E005 for more information")
+        return Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E0005] invalid type found: expected path, got '{}'", quote!(#ty)))
+          .note("go to https://finch-gen.github.io/docs/errors/E0005 for more information")
           .emit(TokenStream::new());
       }
 
-      if CLASS_ERROR.lock().unwrap().iter().find(|x| x == &&name.to_string()).is_some() {
+      if CLASS_ERROR.lock().unwrap().contains(&name.to_string()) {
         return item;
       }
 
@@ -163,13 +161,13 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
               for input in &method.sig.inputs {
                 match input {
                   syn::FnArg::Typed(arg) => {
-                    input_names.push(arg.pat.clone());
+                    let pat = &arg.pat;
+                    input_names.push(arg.ty.convert_arg(quote!(#pat)));
                   },
                   _ => {},
                 }
               }
 
-              let ret_type = &method.sig.output;
               let int_method_name;
               let fn_body;
               let mut extra_comments = quote!();
@@ -220,8 +218,8 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                   })
                 } else {
-                  return Diagnostic::spanned(asyncness.span, DiagnosticLevel::Error, "finch-gen[E002] found async function but the 'async' feature is not enabled")
-                    .note("go to https://finch-gen.github.io/docs/errors/E002 for more information")
+                  return Diagnostic::spanned(asyncness.span, DiagnosticLevel::Error, "finch-gen[E0002] found async function but the 'async' feature is not enabled")
+                    .note("go to https://finch-gen.github.io/docs/errors/E0002 for more information")
                     .help("enable the 'async' feature for finch-gen in your Cargo.toml")
                     .emit(TokenStream::new());
                 }
@@ -229,8 +227,29 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 fn_body
               };
 
-              let (ret_expr, fn_body) = convert_return_type(&ret_type, fn_body);
-              let inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma> = syn::punctuated::Punctuated::from_iter(inputs.into_iter());
+              let ret_expr;
+              let body;
+              if let syn::ReturnType::Type(_, ty) = &method.sig.output {
+                let ret_type = ty.to_c_type();
+                ret_expr = quote!(-> #ret_type);
+                body = ty.convert_ret(fn_body);
+              } else {
+                ret_expr = proc_macro2::TokenStream::new();
+                body = fn_body;
+              }
+
+              let inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma> = syn::punctuated::Punctuated::from_iter(
+                inputs.into_iter().map(|x| {
+                  match &x {
+                    syn::FnArg::Receiver(_) => x,
+                    syn::FnArg::Typed(y) => {
+                      let mut z = y.clone();
+                      z.ty = Box::new(z.ty.to_c_type());
+                      syn::FnArg::Typed(z)
+                    }
+                  }
+                })
+              );
 
               let doc_comments = method.attrs.iter().filter(doc_filter);
               let panic_hook = inject_panic_hook();
@@ -244,7 +263,7 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 pub unsafe extern fn #int_method_name(#inputs) #ret_expr {
                   #panic_hook
 
-                  #fn_body
+                  #body
                 }
               ));
             }
@@ -274,8 +293,8 @@ pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     _ => {
-      return Diagnostic::spanned(input.span(), DiagnosticLevel::Error, &format!("finch-gen[E003] unexpected type for #[finch_bindgen], expected struct or impl, got '{}'", item))
-        .note("go to https://finch-gen.github.io/docs/errors/E003 for more information")
+      return Diagnostic::spanned(input.span(), DiagnosticLevel::Error, &format!("finch-gen[E0003] unexpected type for #[finch_bindgen], expected struct or impl, got '{}'", item))
+        .note("go to https://finch-gen.github.io/docs/errors/E0003 for more information")
         .emit(item);
     }
   }
@@ -295,100 +314,231 @@ fn inject_panic_hook() -> proc_macro2::TokenStream {
     ::finch_gen::builtin::PANIC_HOOK.call_once(|| {
       ::std::panic::set_hook(Box::new(|x| {
         ::std::eprintln!("thread '<{}>' {}", ::std::thread::current().name().unwrap_or("unnamed"), x);
-        ::std::process::exit(1);
+        ::std::process::abort();
       }));
     });
   };)
 }
 
-fn convert_return_type(ret_type: &syn::ReturnType, body: proc_macro2::TokenStream) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
-  match ret_type.clone() {
-    syn::ReturnType::Default => (proc_macro2::TokenStream::new(), body),
-    syn::ReturnType::Type(_, ty) => {
-      match *ty.clone() {
-        syn::Type::Path(path) => {
-          let ident = path.path.segments.first().unwrap().ident.clone();
-          let ty_name = ident.to_string();
+trait ToCType {
+  fn to_c_type(&self) -> syn::Type;
+  fn convert_arg(&self, body: proc_macro2::TokenStream) -> proc_macro2::TokenStream;
+  fn convert_ret(&self, body: proc_macro2::TokenStream) -> proc_macro2::TokenStream;
+}
 
-          match ty_name.as_str() {
-            "bool" => (quote!(#ret_type), body),
-            "char" => (quote!(#ret_type), body),
-            "u8" => (quote!(#ret_type), body),
-            "u16" => (quote!(#ret_type), body),
-            "u32" => (quote!(#ret_type), body),
-            "u64" => (quote!(#ret_type), body),
-            "usize" => (quote!(#ret_type), body),
-            "i8" => (quote!(#ret_type), body),
-            "i16" => (quote!(#ret_type), body),
-            "i32" => (quote!(#ret_type), body),
-            "i64" => (quote!(#ret_type), body),
-            "isize" => (quote!(#ret_type), body),
-            "f32" => (quote!(#ret_type), body),
-            "f64" => (quote!(#ret_type), body),
-
-            "c_void" => (quote!(#ret_type), body),
-            "c_char" => (quote!(#ret_type), body),
-            "c_schar" => (quote!(#ret_type), body),
-            "c_uchar" => (quote!(#ret_type), body),
-            "c_float" => (quote!(#ret_type), body),
-            "c_double" => (quote!(#ret_type), body),
-            "c_short" => (quote!(#ret_type), body),
-            "c_int" => (quote!(#ret_type), body),
-            "c_long" => (quote!(#ret_type), body),
-            "c_longlong" => (quote!(#ret_type), body),
-            "c_ushort" => (quote!(#ret_type), body),
-            "c_uint" => (quote!(#ret_type), body),
-            "c_ulong" => (quote!(#ret_type), body),
-            "c_ulonglong" => (quote!(#ret_type), body),
-
-            "uint8_t" => (quote!(#ret_type), body),
-            "uint16_t" => (quote!(#ret_type), body),
-            "uint32_t" => (quote!(#ret_type), body),
-            "uint64_t" => (quote!(#ret_type), body),
-            "uintptr_t" => (quote!(#ret_type), body),
-            "size_t" => (quote!(#ret_type), body),
-            "int8_t" => (quote!(#ret_type), body),
-            "int16_t" => (quote!(#ret_type), body),
-            "int32_t" => (quote!(#ret_type), body),
-            "int64_t" => (quote!(#ret_type), body),
-            "intptr_t" => (quote!(#ret_type), body),
-            "ssize_t" => (quote!(#ret_type), body),
-            "ptrdiff_t" => (quote!(#ret_type), body),
-
-            "Self" => (
-              quote!(-> *mut #ident),
-              quote!(Box::into_raw(Box::new(#body)))
-            ),
-
-            "String" => (
-              quote!(-> ::finch_gen::builtin::FinchString),
-              quote!(::finch_gen::builtin::FinchString::new(#body))
-            ),
-
-            _ => {
-              return (
-                proc_macro2::TokenStream::new(),
-                proc_macro2::TokenStream::from(
-                  Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E004] unsupported type '{}'", quote!(#ty)))
-                    .note("go to https://finch-gen.github.io/docs/errors/E004 for more information")
-                    .emit(TokenStream::new()),
-                  ),
-              );
+impl ToCType for syn::Type {
+  fn to_c_type(&self) -> syn::Type {
+    match self.clone() {
+      syn::Type::Path(path) => {
+        let ident = path.path.segments.first().unwrap().ident.clone();
+        let ty_name = ident.to_string();
+  
+        match ty_name.as_str() {
+          "bool" | "char" | "u8" | "u16" | "u32" | "u64" | "usize"|
+          "i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64" |
+          "c_void" | "c_char" | "c_schar" | "c_uchar" | "c_float" |
+          "c_double" | "c_short" | "c_int" | "c_long" | "c_longlong" |
+          "c_ushort" | "c_uint" | "c_ulong" | "c_ulonglong" |
+          "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "uintptr_t" |
+          "size_t" |" int8_t" | "int16_t" | "int32_t" | "int64_t" |
+          "intptr_t" | "ssize_t" | "ptrdiff_t" => parse_quote!(#self),
+  
+          "Self" => parse_quote!(*mut #self),
+  
+          "String" => parse_quote!(::finch_gen::builtin::FinchString),
+  
+          "Option" => {
+            if let syn::PathArguments::AngleBracketed(generics) = &path.path.segments.first().unwrap().arguments {
+              if let syn::GenericArgument::Type(ty) = generics.args.first().unwrap() {
+                let inner_type = ty.to_c_type();
+                parse_quote!(::finch_gen::builtin::FinchOption<#inner_type>)
+              } else {
+                parse_quote!(())
+              }
+            } else {
+              parse_quote!(())
             }
-          }
-        },
-
-        _ => {
-          return (
-            proc_macro2::TokenStream::new(),
-            proc_macro2::TokenStream::from(
-              Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E004] unsupported type '{}'", quote!(#ty)))
-                .note("go to https://finch-gen.github.io/docs/errors/E004 for more information")
-                .emit(TokenStream::new()),
-              ),
-          );
+          },
+  
+          "Result" => {
+            if let syn::PathArguments::AngleBracketed(generics) = &path.path.segments.first().unwrap().arguments {
+              if let syn::GenericArgument::Type(ty) = generics.args.first().unwrap() {
+                let inner_type = ty.to_c_type();
+                parse_quote!(::finch_gen::builtin::FinchResult<#inner_type>)
+              } else {
+                parse_quote!(())
+              }
+            } else {
+              parse_quote!(())
+            }
+          },
+  
+          _ => parse_quote!(()),
         }
-      }
+      },
+  
+      _ => parse_quote!(()),
+    }
+  }
+
+  fn convert_arg(&self, body: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    match self.clone() {
+      syn::Type::Path(path) => {
+        let ident = path.path.segments.first().unwrap().ident.clone();
+        let ty_name = ident.to_string();
+  
+        match ty_name.as_str() {
+          "bool" | "char" | "u8" | "u16" | "u32" | "u64" | "usize"|
+          "i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64" |
+          "c_void" | "c_char" | "c_schar" | "c_uchar" | "c_float" |
+          "c_double" | "c_short" | "c_int" | "c_long" | "c_longlong" |
+          "c_ushort" | "c_uint" | "c_ulong" | "c_ulonglong" |
+          "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "uintptr_t" |
+          "size_t" |" int8_t" | "int16_t" | "int32_t" | "int64_t" |
+          "intptr_t" | "ssize_t" | "ptrdiff_t" => body,
+  
+          "Self" => quote!(Box::into_raw(Box::new(#body))),
+  
+          "String" => quote!(*Box::from_raw(::std::mem::ManuallyDrop::new(#body).string)),
+
+          "Option" => {
+            if let syn::PathArguments::AngleBracketed(generics) = &path.path.segments.first().unwrap().arguments {
+              if let syn::GenericArgument::Type(ty) = generics.args.first().unwrap() {
+                let inner_body = ty.convert_arg(quote!(x));
+                quote!({
+                  if let ::finch_gen::builtin::FinchOption::Some(x) = #body {
+                    Some(#inner_body)
+                  } else {
+                    None
+                  }
+                })
+              } else {
+                proc_macro2::TokenStream::from(
+                  Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0006] expected type for generics`"))
+                    .note("go to https://finch-gen.github.io/docs/errors/E0006 for more information")
+                    .emit(TokenStream::new()),
+                )
+              }
+            } else {
+              proc_macro2::TokenStream::from(
+                Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0007] expected generics for Option"))
+                  .note("go to https://finch-gen.github.io/docs/errors/E0007 for more information")
+                  .emit(TokenStream::new()),
+              )
+            }
+          },
+  
+          _ => {
+            proc_macro2::TokenStream::from(
+              Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0004] unsupported type '{}'", quote!(#self)))
+                .note("go to https://finch-gen.github.io/docs/errors/E0004 for more information")
+                .emit(TokenStream::new()),
+            )
+          }
+        }
+      },
+  
+      _ => {
+          proc_macro2::TokenStream::from(
+            Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0004] unsupported type '{}'", quote!(#self)))
+              .note("go to https://finch-gen.github.io/docs/errors/E0004 for more information")
+              .emit(TokenStream::new()),
+          )
+      },
+    }
+  }
+
+  fn convert_ret(&self, body: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    match self.clone() {
+      syn::Type::Path(path) => {
+        let ident = path.path.segments.first().unwrap().ident.clone();
+        let ty_name = ident.to_string();
+  
+        match ty_name.as_str() {
+          "bool" | "char" | "u8" | "u16" | "u32" | "u64" | "usize"|
+          "i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64" |
+          "c_void" | "c_char" | "c_schar" | "c_uchar" | "c_float" |
+          "c_double" | "c_short" | "c_int" | "c_long" | "c_longlong" |
+          "c_ushort" | "c_uint" | "c_ulong" | "c_ulonglong" |
+          "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "uintptr_t" |
+          "size_t" |" int8_t" | "int16_t" | "int32_t" | "int64_t" |
+          "intptr_t" | "ssize_t" | "ptrdiff_t" => body,
+  
+          "Self" => quote!(Box::into_raw(Box::new(#body))),
+  
+          "String" => quote!(::finch_gen::builtin::FinchString::from(#body)),
+  
+          "Option" => {
+            if let syn::PathArguments::AngleBracketed(generics) = &path.path.segments.first().unwrap().arguments {
+              if let syn::GenericArgument::Type(ty) = generics.args.first().unwrap() {
+                let inner_body = ty.convert_ret(quote!(x));
+                quote!({
+                  if let Some(x) = #body {
+                    ::finch_gen::builtin::FinchOption::Some(#inner_body)
+                  } else {
+                    ::finch_gen::builtin::FinchOption::None
+                  }
+                })
+              } else {
+                proc_macro2::TokenStream::from(
+                  Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0006] expected type for generics`"))
+                    .note("go to https://finch-gen.github.io/docs/errors/E0006 for more information")
+                    .emit(TokenStream::new()),
+                )
+              }
+            } else {
+              proc_macro2::TokenStream::from(
+                Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0007] expected generics for Option"))
+                  .note("go to https://finch-gen.github.io/docs/errors/E0007 for more information")
+                  .emit(TokenStream::new()),
+              )
+            }
+          },
+  
+          "Result" => {
+            if let syn::PathArguments::AngleBracketed(generics) = &path.path.segments.first().unwrap().arguments {
+              if let syn::GenericArgument::Type(ty) = generics.args.first().unwrap() {
+                let inner_body = ty.convert_ret(quote!(x));
+                quote!({
+                  let r = #body;
+                  match r {
+                    Ok(x) => ::finch_gen::builtin::FinchResult::Ok(#inner_body),
+                    Err(x) => ::finch_gen::builtin::FinchResult::Err(::finch_gen::builtin::FinchString::from(format!("{}", x))),
+                  }
+                })
+              } else {
+                proc_macro2::TokenStream::from(
+                  Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0006] expected type for generics`"))
+                    .note("go to https://finch-gen.github.io/docs/errors/E0006 for more information")
+                    .emit(TokenStream::new()),
+                )
+              }
+            } else {
+              proc_macro2::TokenStream::from(
+                Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0007] expected generics for Result"))
+                  .note("go to https://finch-gen.github.io/docs/errors/E0007 for more information")
+                  .emit(TokenStream::new()),
+              )
+            }
+          },
+  
+          _ => {
+            proc_macro2::TokenStream::from(
+              Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0004] unsupported type '{}'", quote!(#self)))
+                .note("go to https://finch-gen.github.io/docs/errors/E0004 for more information")
+                .emit(TokenStream::new()),
+            )
+          }
+        }
+      },
+  
+      _ => {
+          proc_macro2::TokenStream::from(
+            Diagnostic::spanned(self.span(), DiagnosticLevel::Error, &format!("finch-gen[E0004] unsupported type '{}'", quote!(#self)))
+              .note("go to https://finch-gen.github.io/docs/errors/E0004 for more information")
+              .emit(TokenStream::new()),
+          )
+      },
     }
   }
 }

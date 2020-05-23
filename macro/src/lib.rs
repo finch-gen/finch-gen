@@ -1,23 +1,33 @@
 #![cfg_attr(nightly, feature(proc_macro_diagnostic))]
 
+use std::fs::File;
 use std::sync::Once;
 use std::sync::Mutex;
+use std::error::Error;
+use std::path::PathBuf;
+use std::io::prelude::*;
 use std::iter::FromIterator;
 use std::collections::HashSet;
+use std::collections::HashMap;
 use syn::spanned::Spanned;
 use proc_macro::TokenStream;
 use lazy_static::lazy_static;
 use syn::{parse_macro_input, parse_quote};
-use quote::{quote, format_ident};
+use quote::{quote, format_ident, ToTokens};
 
 mod builtin;
 mod diagnostic;
 use diagnostic::{Diagnostic, DiagnosticLevel};
 
+mod r#struct;
+use r#struct::{Item, Struct};
+
 static INJECT: Once = Once::new();
 
 lazy_static! {
   static ref CLASS_ERROR: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+
+  static ref FINCH_IR: Mutex<HashMap<String, Item>> = Mutex::new(HashMap::new());
 }
 
 fn doc_filter<'r>(x: &'r &syn::Attribute) -> bool {
@@ -28,277 +38,309 @@ fn crate_name() -> String {
   std::env::var("CARGO_PKG_NAME").unwrap().replace("-", "_")
 }
 
-#[proc_macro_attribute]
-pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
-  let cloned = item.clone();
-  let input = parse_macro_input!(cloned as syn::Item);
-
-  match input {
-    syn::Item::Struct(data) => {
-      let name = &data.ident;
-
-      match data.vis {
-        syn::Visibility::Public(_) => {}
-        _ => {
-          CLASS_ERROR.lock().unwrap().insert(name.to_string());
-
-          return Diagnostic::spanned(data.span(), DiagnosticLevel::Error, "finch-gen[E0001] struct not public but exported with #[finch_bindgen]")
-            .note("go to https://finch-gen.github.io/docs/errors/E0001 for more information")
-            .span_help(data.struct_token.span, "add 'pub' here")
-            .emit(item);
-        }
-      }
-
-      let mut functions = Vec::new();
-
-      match &data.fields {
-        syn::Fields::Named(fields) => {
-          for field in &fields.named {
-            if let syn::Visibility::Public(_) = field.vis {
-              let readable = true;
-              let writeable = true;
-              // for attr in &field.attrs {
-              //   match attr.path.segments.first().unwrap().ident.to_string().as_str() {
-              //     "finch_private" => {readable = false; writeable = false},
-              //     "finch_readonly" => writeable = false,
-              //     "finch_writeonly" => readable = false,
-              //     _ => {},
-              //   }
-              // }
-
-              let field_name = field.clone().ident.unwrap();
-              let field_type = &field.ty;
-              let doc_comments = field.attrs.iter().filter(doc_filter);
-
-              if readable {
-                let getter_name = format_ident!("___finch_bindgen___{}___class___{}___getter___{}", crate_name(), name, field_name);
-                let doc_comments_getter = doc_comments.clone();
-                functions.push(quote!(
-                  #(#doc_comments_getter)
-                  *
-                  #[no_mangle]
-                  pub unsafe extern fn #getter_name(&self) -> #field_type {
-                    self.#field_name
-                  }
-                ));
-              }
-
-              if writeable {
-                let setter_name = format_ident!("___finch_bindgen___{}___class___{}___setter___{}", crate_name(), name, field_name);
-                functions.push(quote!(
-                  #(#doc_comments)
-                  *
-                  #[no_mangle]
-                  pub unsafe extern fn #setter_name(&mut self, value: #field_type) {
-                    self.#field_name = value
-                  }
-                ));
-              }
-            }
-          }
-        }
-
-        _ => {}
-      }
-
-      let doc_comments = data.attrs.iter().filter(doc_filter);
-
-      let drop_name = format_ident!("___finch_bindgen___{}___class___{}___drop", crate_name(), name);
-      let new_name = format_ident!("___finch_bindgen___{}___class___{}___type", crate_name(), name);
-
-      let item = proc_macro2::TokenStream::from(item);
-
-      let boilerplate = inject_boilerplate();
-      let class_impl = quote!(
-        #item
-
-        #(#doc_comments)
-        *
-        #[allow(non_camel_case_types)]
-        type #new_name = #name;
-
-        #[allow(non_snake_case)]
-        impl #new_name {
-          #[no_mangle]
-          pub unsafe extern fn #drop_name(ptr: *mut Self) {
-            drop(Box::from_raw(ptr))
-          }
-
-          #(#functions)*
-        }
-
-        #boilerplate
-      );
-
-      TokenStream::from(class_impl)
-    }
-
-    syn::Item::Impl(input) => {
-      let name;
-      if let syn::Type::Path(path) = *input.self_ty.clone() {
-        name = path.path.segments.first().unwrap().ident.clone();
-      } else {
-        let ty = input.self_ty;
-        return Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E0005] invalid type found: expected path, got '{}'", quote!(#ty)))
-          .note("go to https://finch-gen.github.io/docs/errors/E0005 for more information")
-          .emit(TokenStream::new());
-      }
-
-      if CLASS_ERROR.lock().unwrap().contains(&name.to_string()) {
-        return item;
-      }
-
-      let mut functions = Vec::new();
-
-      for item in &input.items {
-        match item {
-          syn::ImplItem::Method(method) => {
-            if let syn::Visibility::Public(_) = method.vis {
-              let method_name = &method.sig.ident;
-              let mut inputs = Vec::from_iter(method.sig.inputs.clone());
-              let mut input_names = Vec::new();
-
-              for input in &method.sig.inputs {
-                match input {
-                  syn::FnArg::Typed(arg) => {
-                    let pat = &arg.pat;
-                    input_names.push(arg.ty.convert_arg(quote!(#pat)));
-                  },
-                  _ => {},
-                }
-              }
-
-              let int_method_name;
-              let fn_body;
-              let mut extra_comments = quote!();
-
-              if method.sig.inputs.len() > 0 {
-                match method.sig.inputs.first().unwrap() {
-                  syn::FnArg::Receiver(receiver) => {
-                    if receiver.reference.is_some() {
-                      int_method_name = format_ident!("___finch_bindgen___{}___class___{}___method___{}", crate_name(), name, method_name);
-                      fn_body = quote!(self.#method_name(#(#input_names),*));
-                    } else {
-                      int_method_name = format_ident!("___finch_bindgen___{}___class___{}___method_consume___{}", crate_name(), name, method_name);
-                      inputs.remove(0);
-                      inputs.insert(0, parse_quote!(ptr: *mut Self));
-                      fn_body = quote!(Box::from_raw(ptr).#method_name(#(#input_names),*));
-                      extra_comments = quote!(
-                        /// This method consumes the internal pointer.
-                        /// You cannot call any methods, or get/set any values
-                        /// after calling this method.
-                      );
-                    }
-                  },
-
-                  syn::FnArg::Typed(_) => {
-                    int_method_name = format_ident!("___finch_bindgen___{}___class___{}___static___{}", crate_name(), name, method_name);
-                    fn_body = quote!(Self::#method_name(#(#input_names),*));
-                  }
-                }
-              } else {
-                int_method_name = format_ident!("___finch_bindgen___{}___class___{}___static___{}", crate_name(), name, method_name);
-                fn_body = quote!(Self::#method_name(#(#input_names),*));
-              }
-
-              let fn_body = if let Some(asyncness) = method.sig.asyncness {
-                if cfg!(feature = "async") {
-                  quote!({
-                    let mut rt = finch_gen::builtin::RUNTIME.get_mut();
-                    if rt.is_none() {
-                      *rt = ::std::option::Option::Some(::tokio::runtime::Runtime::new().expect("failed to create tokio runtime"));
-                    }
-  
-                    if let ::std::option::Option::Some(rt) = rt {
-                      rt.block_on(async {
-                        #fn_body.await
-                      })
-                    } else {
-                      panic!("failed to get tokio runtime")
-                    }
-                  })
-                } else {
-                  return Diagnostic::spanned(asyncness.span, DiagnosticLevel::Error, "finch-gen[E0002] found async function but the 'async' feature is not enabled")
-                    .note("go to https://finch-gen.github.io/docs/errors/E0002 for more information")
-                    .help("enable the 'async' feature for finch-gen in your Cargo.toml")
-                    .emit(TokenStream::new());
-                }
-              } else {
-                fn_body
-              };
-
-              let ret_expr;
-              let body;
-              if let syn::ReturnType::Type(_, ty) = &method.sig.output {
-                let ret_type = ty.to_c_type();
-                ret_expr = quote!(-> #ret_type);
-                body = ty.convert_ret(fn_body);
-              } else {
-                ret_expr = proc_macro2::TokenStream::new();
-                body = fn_body;
-              }
-
-              let inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma> = syn::punctuated::Punctuated::from_iter(
-                inputs.into_iter().map(|x| {
-                  match &x {
-                    syn::FnArg::Receiver(_) => x,
-                    syn::FnArg::Typed(y) => {
-                      let mut z = y.clone();
-                      z.ty = Box::new(z.ty.to_c_type());
-                      syn::FnArg::Typed(z)
-                    }
-                  }
-                })
-              );
-
-              let doc_comments = method.attrs.iter().filter(doc_filter);
-              let panic_hook = inject_panic_hook();
-
-              functions.push(quote!(
-                #(#doc_comments)
-                *
-
-                #extra_comments
-                #[no_mangle]
-                pub unsafe extern fn #int_method_name(#inputs) #ret_expr {
-                  #panic_hook
-
-                  #body
-                }
-              ));
-            }
-          },
-
-          _ => {},
-        }
-      }
-
-      let new_name = format_ident!("___finch_bindgen___{}___class___{}___type", crate_name(), name);
-
-      let item = proc_macro2::TokenStream::from(item);
-
-      let boilerplate = inject_boilerplate();
-      let class_impl = quote!(
-        #item
-
-        #[allow(non_snake_case)]
-        impl #new_name {
-          #(#functions)*
-        }
-
-        #boilerplate
-      );
-
-      proc_macro::TokenStream::from(class_impl)
-    }
-
-    _ => {
-      return Diagnostic::spanned(input.span(), DiagnosticLevel::Error, &format!("finch-gen[E0003] unexpected type for #[finch_bindgen], expected struct or impl, got '{}'", item))
-        .note("go to https://finch-gen.github.io/docs/errors/E0003 for more information")
-        .emit(item);
-    }
-  }
+#[cfg(not(feature = "json"))]
+fn write_ir() -> Result<(), Box<dyn Error>> {
+  let mut file = File::create(PathBuf::from(env!("OUT_DIR")).join("../../..").join(format!("{}.fir", crate_name())))?;
+  let encoded: Vec<u8> = bincode::serialize(&*FINCH_IR.lock()?)?;
+  file.write_all(encoded.as_slice())?;
+  Ok(())
 }
+
+#[cfg(feature = "json")]
+fn write_ir() -> Result<(), Box<dyn Error>> {
+  let mut file = File::create(PathBuf::from(env!("OUT_DIR")).join("../../..").join(format!("{}.firj", crate_name())))?;
+  let encoded = serde_json::to_string(&*FINCH_IR.lock()?)?;
+  file.write_all(encoded.as_bytes())?;
+  Ok(())
+}
+
+ #[proc_macro_attribute]
+pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  item
+}
+
+// #[proc_macro_attribute]
+// pub fn finch_bindgen(_attr: TokenStream, item: TokenStream) -> TokenStream {
+//   let cloned = item.clone();
+//   let input = parse_macro_input!(cloned as syn::Item);
+
+//   match input {
+//     syn::Item::Struct(data) => {
+//       let name = &data.ident;
+
+//       match data.vis {
+//         syn::Visibility::Public(_) => {}
+//         _ => {
+//           CLASS_ERROR.lock().unwrap().insert(name.to_string());
+
+//           return Diagnostic::spanned(data.span(), DiagnosticLevel::Error, "finch-gen[E0001] struct not public but exported with #[finch_bindgen]")
+//             .note("go to https://finch-gen.github.io/docs/errors/E0001 for more information")
+//             .span_help(data.struct_token.span, "add 'pub' here")
+//             .emit(item);
+//         }
+//       }
+
+//       let mut tokens = proc_macro2::TokenStream::from(item);
+//       let (s, token) = Struct::new(data.clone());
+//       FINCH_IR.lock().unwrap().insert(s.name.clone(), Item::Struct(s));
+//       // let serialized = serde_json::to_string(&*FINCH_IR.lock().unwrap()).unwrap();
+//       println!("{:#?}", FINCH_IR.lock().unwrap());
+//       write_ir().expect("failed to write ir");
+
+//       token.to_tokens(&mut tokens);
+
+//       return TokenStream::from(tokens);
+
+//       // let mut functions = Vec::new();
+
+//       // match &data.fields {
+//       //   syn::Fields::Named(fields) => {
+//       //     for field in &fields.named {
+//       //       if let syn::Visibility::Public(_) = field.vis {
+//       //         let readable = true;
+//       //         let writeable = true;
+//       //         // for attr in &field.attrs {
+//       //         //   match attr.path.segments.first().unwrap().ident.to_string().as_str() {
+//       //         //     "finch_private" => {readable = false; writeable = false},
+//       //         //     "finch_readonly" => writeable = false,
+//       //         //     "finch_writeonly" => readable = false,
+//       //         //     _ => {},
+//       //         //   }
+//       //         // }
+
+//       //         let field_name = field.clone().ident.unwrap();
+//       //         let field_type = &field.ty;
+//       //         let doc_comments = field.attrs.iter().filter(doc_filter);
+
+//       //         if readable {
+//       //           let getter_name = format_ident!("___finch_bindgen___{}___class___{}___getter___{}", crate_name(), name, field_name);
+//       //           let doc_comments_getter = doc_comments.clone();
+//       //           functions.push(quote!(
+//       //             #(#doc_comments_getter)
+//       //             *
+//       //             #[no_mangle]
+//       //             pub unsafe extern fn #getter_name(&self) -> #field_type {
+//       //               self.#field_name
+//       //             }
+//       //           ));
+//       //         }
+
+//       //         if writeable {
+//       //           let setter_name = format_ident!("___finch_bindgen___{}___class___{}___setter___{}", crate_name(), name, field_name);
+//       //           functions.push(quote!(
+//       //             #(#doc_comments)
+//       //             *
+//       //             #[no_mangle]
+//       //             pub unsafe extern fn #setter_name(&mut self, value: #field_type) {
+//       //               self.#field_name = value
+//       //             }
+//       //           ));
+//       //         }
+//       //       }
+//       //     }
+//       //   }
+
+//       //   _ => {}
+//       // }
+
+//       // let doc_comments = data.attrs.iter().filter(doc_filter);
+
+//       // let drop_name = format_ident!("___finch_bindgen___{}___class___{}___drop", crate_name(), name);
+//       // let new_name = format_ident!("___finch_bindgen___{}___class___{}___type", crate_name(), name);
+
+//       // let item = proc_macro2::TokenStream::from(item);
+
+//       // let boilerplate = inject_boilerplate();
+//       // let class_impl = quote!(
+//       //   #item
+
+//       //   #(#doc_comments)
+//       //   *
+//       //   #[allow(non_camel_case_types)]
+//       //   type #new_name = #name;
+
+//       //   #[allow(non_snake_case)]
+//       //   impl #new_name {
+//       //     #[no_mangle]
+//       //     pub unsafe extern fn #drop_name(ptr: *mut Self) {
+//       //       drop(Box::from_raw(ptr))
+//       //     }
+
+//       //     #(#functions)*
+//       //   }
+
+//       //   #boilerplate
+//       // );
+
+//       // TokenStream::from(class_impl)
+//     }
+
+//     syn::Item::Impl(input) => {
+//       let name;
+//       if let syn::Type::Path(path) = *input.self_ty.clone() {
+//         name = path.path.segments.first().unwrap().ident.clone();
+//       } else {
+//         let ty = input.self_ty;
+//         return Diagnostic::spanned(ty.span(), DiagnosticLevel::Error, &format!("finch-gen[E0005] invalid type found: expected path, got '{}'", quote!(#ty)))
+//           .note("go to https://finch-gen.github.io/docs/errors/E0005 for more information")
+//           .emit(TokenStream::new());
+//       }
+
+//       if CLASS_ERROR.lock().unwrap().contains(&name.to_string()) {
+//         return item;
+//       }
+
+//       let mut functions = Vec::new();
+
+//       for item in &input.items {
+//         match item {
+//           syn::ImplItem::Method(method) => {
+//             if let syn::Visibility::Public(_) = method.vis {
+//               let method_name = &method.sig.ident;
+//               let mut inputs = Vec::from_iter(method.sig.inputs.clone());
+//               let mut input_names = Vec::new();
+
+//               for input in &method.sig.inputs {
+//                 match input {
+//                   syn::FnArg::Typed(arg) => {
+//                     let pat = &arg.pat;
+//                     input_names.push(arg.ty.convert_arg(quote!(#pat)));
+//                   },
+//                   _ => {},
+//                 }
+//               }
+
+//               let int_method_name;
+//               let fn_body;
+//               let mut extra_comments = quote!();
+
+//               if method.sig.inputs.len() > 0 {
+//                 match method.sig.inputs.first().unwrap() {
+//                   syn::FnArg::Receiver(receiver) => {
+//                     if receiver.reference.is_some() {
+//                       int_method_name = format_ident!("___finch_bindgen___{}___class___{}___method___{}", crate_name(), name, method_name);
+//                       fn_body = quote!(self.#method_name(#(#input_names),*));
+//                     } else {
+//                       int_method_name = format_ident!("___finch_bindgen___{}___class___{}___method_consume___{}", crate_name(), name, method_name);
+//                       inputs.remove(0);
+//                       inputs.insert(0, parse_quote!(ptr: *mut Self));
+//                       fn_body = quote!(Box::from_raw(ptr).#method_name(#(#input_names),*));
+//                       extra_comments = quote!(
+//                         /// This method consumes the internal pointer.
+//                         /// You cannot call any methods, or get/set any values
+//                         /// after calling this method.
+//                       );
+//                     }
+//                   },
+
+//                   syn::FnArg::Typed(_) => {
+//                     int_method_name = format_ident!("___finch_bindgen___{}___class___{}___static___{}", crate_name(), name, method_name);
+//                     fn_body = quote!(Self::#method_name(#(#input_names),*));
+//                   }
+//                 }
+//               } else {
+//                 int_method_name = format_ident!("___finch_bindgen___{}___class___{}___static___{}", crate_name(), name, method_name);
+//                 fn_body = quote!(Self::#method_name(#(#input_names),*));
+//               }
+
+//               let fn_body = if let Some(asyncness) = method.sig.asyncness {
+//                 if cfg!(feature = "async") {
+//                   quote!({
+//                     let mut rt = finch_gen::builtin::RUNTIME.get_mut();
+//                     if rt.is_none() {
+//                       *rt = ::std::option::Option::Some(::tokio::runtime::Runtime::new().expect("failed to create tokio runtime"));
+//                     }
+  
+//                     if let ::std::option::Option::Some(rt) = rt {
+//                       rt.block_on(async {
+//                         #fn_body.await
+//                       })
+//                     } else {
+//                       panic!("failed to get tokio runtime")
+//                     }
+//                   })
+//                 } else {
+//                   return Diagnostic::spanned(asyncness.span, DiagnosticLevel::Error, "finch-gen[E0002] found async function but the 'async' feature is not enabled")
+//                     .note("go to https://finch-gen.github.io/docs/errors/E0002 for more information")
+//                     .help("enable the 'async' feature for finch-gen in your Cargo.toml")
+//                     .emit(TokenStream::new());
+//                 }
+//               } else {
+//                 fn_body
+//               };
+
+//               let ret_expr;
+//               let body;
+//               if let syn::ReturnType::Type(_, ty) = &method.sig.output {
+//                 let ret_type = ty.to_c_type();
+//                 ret_expr = quote!(-> #ret_type);
+//                 body = ty.convert_ret(fn_body);
+//               } else {
+//                 ret_expr = proc_macro2::TokenStream::new();
+//                 body = fn_body;
+//               }
+
+//               let inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma> = syn::punctuated::Punctuated::from_iter(
+//                 inputs.into_iter().map(|x| {
+//                   match &x {
+//                     syn::FnArg::Receiver(_) => x,
+//                     syn::FnArg::Typed(y) => {
+//                       let mut z = y.clone();
+//                       z.ty = Box::new(z.ty.to_c_type());
+//                       syn::FnArg::Typed(z)
+//                     }
+//                   }
+//                 })
+//               );
+
+//               let doc_comments = method.attrs.iter().filter(doc_filter);
+//               let panic_hook = inject_panic_hook();
+
+//               functions.push(quote!(
+//                 #(#doc_comments)
+//                 *
+
+//                 #extra_comments
+//                 #[no_mangle]
+//                 pub unsafe extern fn #int_method_name(#inputs) #ret_expr {
+//                   #panic_hook
+
+//                   #body
+//                 }
+//               ));
+//             }
+//           },
+
+//           _ => {},
+//         }
+//       }
+
+//       let new_name = format_ident!("___finch_bindgen___{}___class___{}___type", crate_name(), name);
+
+//       let item = proc_macro2::TokenStream::from(item);
+
+//       let boilerplate = inject_boilerplate();
+//       let class_impl = quote!(
+//         #item
+
+//         #[allow(non_snake_case)]
+//         impl #new_name {
+//           #(#functions)*
+//         }
+
+//         #boilerplate
+//       );
+
+//       proc_macro::TokenStream::from(class_impl)
+//     }
+
+//     _ => {
+//       return Diagnostic::spanned(input.span(), DiagnosticLevel::Error, &format!("finch-gen[E0003] unexpected type for #[finch_bindgen], expected struct or impl, got '{}'", item))
+//         .note("go to https://finch-gen.github.io/docs/errors/E0003 for more information")
+//         .emit(item);
+//     }
+//   }
+// }
 
 fn inject_boilerplate() -> proc_macro2::TokenStream {
   let mut out = proc_macro2::TokenStream::new();
